@@ -1,0 +1,107 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullName := include "sports-analytics.fullname" . -}}
+{{- $appComponents := list "main-service" "auth-service" "media-service" "notifications-service" "analytics-api" "analytics-worker" -}}
+{{- $migrateComponents := list "auth-migrate" "media-migrate" "notifications-migrate" -}}
+# Default-deny all ingress for chart-managed pods. The rules below open the
+# documented edges only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-default-deny
+  labels:
+    {{- include "sports-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sports-analytics
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+---
+# Ingress -> main-service is the only public edge.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-main-from-ingress
+  labels:
+    {{- include "sports-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sports-analytics.componentSelector" (dict "component" "main-service" "Release" .Release) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - port: 8000
+---
+# main-service is the only client that may reach the internal services.
+# analytics-worker additionally calls media-service and notifications-service
+# directly (PATCH video.status, POST frames/bulk, POST notifications).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-internal-from-main-and-worker
+  labels:
+    {{- include "sports-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/name, operator: In, values: [sports-analytics] }
+      - { key: app.kubernetes.io/instance, operator: In, values: [ "{{ .Release.Name }}" ] }
+      - { key: app.kubernetes.io/component, operator: In, values: [auth-service, media-service, notifications-service, analytics-api] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "sports-analytics.componentSelector" (dict "component" "main-service" "Release" .Release) | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "sports-analytics.componentSelector" (dict "component" "analytics-worker" "Release" .Release) | nindent 14 }}
+---
+# Postgres accepts traffic only from the database-owning services and their
+# Alembic migration jobs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-postgres-from-services
+  labels:
+    {{- include "sports-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    {{- include "sports-analytics.componentSelector" (dict "component" "postgres" "Release" .Release) | nindent 4 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: [sports-analytics] }
+              - { key: app.kubernetes.io/instance, operator: In, values: [ "{{ .Release.Name }}" ] }
+              - { key: app.kubernetes.io/component, operator: In, values: [auth-service, media-service, notifications-service, auth-migrate, media-migrate, notifications-migrate] }
+      ports:
+        - port: 5432
+---
+# Redis is only spoken to by analytics-api (enqueue) and analytics-worker
+# (BLMOVE consumer).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullName }}-redis-from-analytics
+  labels:
+    {{- include "sports-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    {{- include "sports-analytics.componentSelector" (dict "component" "redis" "Release" .Release) | nindent 4 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: [sports-analytics] }
+              - { key: app.kubernetes.io/instance, operator: In, values: [ "{{ .Release.Name }}" ] }
+              - { key: app.kubernetes.io/component, operator: In, values: [analytics-api, analytics-worker] }
+      ports:
+        - port: 6379
+{{- end }}

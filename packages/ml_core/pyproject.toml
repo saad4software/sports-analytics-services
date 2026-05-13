@@ -1,0 +1,17 @@
+[project]
+name = "ml_core"
+version = "0.1.0"
+description = "Headless football analytics core (YOLO + HSV team color)"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10",
+    "ultralytics>=8.4.48",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ml_core"]

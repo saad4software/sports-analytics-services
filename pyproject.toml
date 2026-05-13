@@ -1,0 +1,54 @@
+[project]
+name = "sports-analytics-services"
+version = "0.2.0"
+description = "Sports analytics microservices (auth + media + notifications + analytics)"
+readme = "README.md"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = [
+    "packages/db_core",
+    "packages/ml_core",
+    "services/auth_service",
+    "services/main_service",
+    "services/media_service",
+    "services/notifications_service",
+    "services/analytics_service",
+    "services/analytics_worker",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+# Lint config consumed by `uv run ruff check .` in CI. Per-service tests still
+# live under each services/<name>/tests directory and are discovered by
+# pytest's rootdir walk; ruff is configured workspace-wide here.
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    ".venv",
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.mypy_cache",
+    "uploads",
+    "**/migrations/versions",
+]
+
+[tool.ruff.lint]
+# Conservative day-1 rule set: pycodestyle errors/warnings, Pyflakes,
+# isort, comprehensions. This keeps CI green on the existing codebase;
+# bugbear (B), pyupgrade (UP), and stricter checks can be opted in
+# once the team has time to address the existing violations.
+select = ["E", "F", "W", "I", "C4"]
+ignore = [
+    "E501",  # line length — handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/migrations/**" = ["E402", "F401"]  # Alembic env.py imports for side effects.

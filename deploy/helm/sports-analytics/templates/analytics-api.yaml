@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-api
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-api" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-api
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-api" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8003
+      targetPort: 8003
+  selector:
+    {{- include "sports-analytics.componentSelector" (dict "component" "analytics-api" "Release" .Release) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-api
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-api" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  replicas: {{ .Values.analyticsApi.replicas }}
+  selector:
+    matchLabels:
+      {{- include "sports-analytics.componentSelector" (dict "component" "analytics-api" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sports-analytics.componentLabels" (dict "component" "analytics-api" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "sports-analytics.fullname" . }}-analytics-api
+      {{- include "sports-analytics.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: analytics-api
+          image: {{ include "sports-analytics.image" (dict "repository" .Values.analyticsApi.image.repository "tag" .Values.analyticsApi.image.tag "Values" .Values) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8003
+          envFrom:
+            - configMapRef:
+                name: {{ include "sports-analytics.configMapName" . }}
+            - secretRef:
+                name: {{ include "sports-analytics.secretName" . }}
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.analyticsApi.resources | nindent 12 }}
+---
+{{- if .Values.analyticsApi.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-api
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-api" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "sports-analytics.fullname" . }}-analytics-api
+  minReplicas: {{ .Values.analyticsApi.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.analyticsApi.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.analyticsApi.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+---
+{{- if or .Values.analyticsApi.autoscaling.enabled (gt (int .Values.analyticsApi.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-api
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-api" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "sports-analytics.componentSelector" (dict "component" "analytics-api" "Release" .Release) | nindent 6 }}
+{{- end }}

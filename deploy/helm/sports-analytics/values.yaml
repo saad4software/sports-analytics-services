@@ -1,0 +1,195 @@
+## Global defaults shared by all workloads.
+global:
+  imageRegistry: ""
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+## Common image tag applied to every service image unless overridden below.
+image:
+  tag: "0.2.0"
+
+## Non-secret configuration consumed by every service. Surfaced via a single
+## ConfigMap so per-environment overrides only touch values.yaml.
+config:
+  jwtAlgorithm: HS256
+  jwtAccessExpMinutes: "60"
+  publicBaseUrl: "http://localhost"
+  uploadDir: /data/uploads
+  yoloModelPath: /data/yolo/yolo26x.pt
+  analyticsQueue: "sports:analytics:jobs"
+  workerHeartbeatPath: /tmp/heartbeat
+  workerMaxAttempts: "3"
+  # DB pool tuning for services that open SQLAlchemy engines.
+  dbPoolSize: "10"
+  dbMaxOverflow: "10"
+  dbPoolRecycleSeconds: "1800"
+
+## Secrets. In production wire these to ExternalSecrets / SealedSecrets;
+## the chart only consumes the rendered Secret.
+secrets:
+  ## When existingSecret is set, the chart does NOT create a Secret and
+  ## instead references the named one. Otherwise the values below populate
+  ## a chart-managed Secret. The referenced Secret must expose the same
+  ## keys this chart renders (INTERNAL_API_KEY, JWT_SECRET, and the three
+  ## per-service *_DATABASE_URL values).
+  existingSecret: ""
+  internalApiKey: change-me-internal-key
+  jwtSecret: change-me-jwt-secret
+  ## Per-owning-service database URLs. Each value lands in the shared Secret
+  ## as AUTH_DATABASE_URL / MEDIA_DATABASE_URL / NOTIFICATIONS_DATABASE_URL.
+  ## Leave empty when postgres.enabled=true — the chart then derives URLs
+  ## from the release-scoped Postgres Service. Set them explicitly when
+  ## pointing at a managed instance (Cloud SQL, RDS, AlloyDB).
+  authDatabaseUrl: ""
+  mediaDatabaseUrl: ""
+  notificationsDatabaseUrl: ""
+
+## Postgres bundled as a minimal StatefulSet. Set enabled=false and wire the
+## three secrets.*DatabaseUrl values to a managed instance (Cloud SQL, RDS, ...).
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  user: postgres
+  password: postgres
+  ## Default database created by the postgres image. The bootstrap script
+  ## below additionally creates one logical DB per owning service.
+  database: postgres
+  ## Databases created on first init via /docker-entrypoint-initdb.d. The
+  ## list must stay in sync with the *_DATABASE_URL secrets above.
+  databases:
+    - sports_auth
+    - sports_media
+    - sports_notifications
+  storageClass: ""
+  storageSize: 10Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 1, memory: 1Gi }
+
+## Redis bundled as a minimal StatefulSet. Set enabled=false to point at a
+## managed Redis via REDIS_URL (override config.redisUrl below).
+redis:
+  enabled: true
+  image: redis:7-alpine
+  storageClass: ""
+  storageSize: 1Gi
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+## Shared RWX volume for uploads. Required because main_service writes files
+## that analytics_worker reads back via stored_path. See README follow-ups
+## for moving this to object storage.
+uploads:
+  storageClass: ""
+  storageSize: 20Gi
+  accessMode: ReadWriteMany
+
+## YOLO weight cache. The analytics_worker initContainer downloads the model
+## here on first start if missing.
+modelCache:
+  storageClass: ""
+  storageSize: 5Gi
+  ## Optional pre-download. Leave url empty to bake the weights into the
+  ## image or copy them in some other way.
+  url: ""
+  sha256: ""
+
+ingress:
+  enabled: true
+  className: nginx
+  host: sports-analytics.local
+  tls:
+    enabled: false
+    secretName: sports-analytics-tls
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+
+## Optional opt-in NetworkPolicies restricting east-west traffic to the edges
+## documented in the architecture diagram.
+networkPolicy:
+  enabled: false
+
+## ---------------------------------------------------------------------------
+## Per-service config. Each entry tunes a Deployment + Service.
+## ---------------------------------------------------------------------------
+
+authService:
+  image:
+    repository: sports-analytics/auth-service
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+mediaService:
+  image:
+    repository: sports-analytics/media-service
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+notificationsService:
+  image:
+    repository: sports-analytics/notifications-service
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+mainService:
+  image:
+    repository: sports-analytics/main-service
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+analyticsApi:
+  image:
+    repository: sports-analytics/analytics-service
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+analyticsWorker:
+  image:
+    repository: sports-analytics/analytics-worker
+  replicas: 1
+  ## Termination grace period must be long enough for a worker to finish a
+  ## job, otherwise the K8s SIGKILL forces a nack and the job retries.
+  terminationGracePeriodSeconds: 120
+  resources:
+    requests: { cpu: "1", memory: 2Gi }
+    limits: { cpu: "2", memory: 4Gi }
+  ## KEDA-based autoscaling on Redis queue length. Requires KEDA installed
+  ## in the cluster. Set keda.enabled=false to fall back to fixed replicas.
+  keda:
+    enabled: true
+    minReplicaCount: 0
+    maxReplicaCount: 5
+    pollingInterval: 10
+    cooldownPeriod: 60
+    listLength: "1"
+
+## One pre-install / pre-upgrade Alembic Job per owning service. They all
+## share the same resource block and rerun token; bump the token to force
+## a re-run without changing the image tag.
+migrationJob:
+  rerunToken: "1"
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }

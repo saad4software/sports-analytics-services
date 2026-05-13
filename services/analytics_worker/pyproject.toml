@@ -1,0 +1,34 @@
+[project]
+name = "analytics_worker"
+version = "0.1.0"
+description = "YOLO video analytics worker (writes frames and lifecycle updates over HTTP)"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "ml_core",
+    "pydantic-settings>=2.5",
+    "python-dotenv>=1.0",
+    "redis>=5.0",
+    "watchfiles>=0.21",
+]
+
+[tool.uv.sources]
+ml_core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]

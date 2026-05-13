@@ -1,0 +1,68 @@
+{{- /*
+  One Alembic Job per owning service, mirroring docker-compose's
+  auth_migrate / media_migrate / notifications_migrate one-shots.
+
+  All three run as Helm pre-install / pre-upgrade hooks and are deleted on
+  success so consecutive `helm upgrade`s don't accumulate Job objects.
+  Bump .Values.migrationJob.rerunToken to force them to re-run even when
+  the chart version and image tags haven't changed.
+*/}}
+{{- $rerun := .Values.migrationJob.rerunToken | quote -}}
+{{- $resources := .Values.migrationJob.resources -}}
+{{- $services := list
+      (dict "name" "auth-migrate"
+            "component" "auth-migrate"
+            "workingDir" "/app/services/auth_service"
+            "repository" .Values.authService.image.repository
+            "tag" (default .Values.image.tag .Values.authService.image.tag))
+      (dict "name" "media-migrate"
+            "component" "media-migrate"
+            "workingDir" "/app/services/media_service"
+            "repository" .Values.mediaService.image.repository
+            "tag" (default .Values.image.tag .Values.mediaService.image.tag))
+      (dict "name" "notifications-migrate"
+            "component" "notifications-migrate"
+            "workingDir" "/app/services/notifications_service"
+            "repository" .Values.notificationsService.image.repository
+            "tag" (default .Values.image.tag .Values.notificationsService.image.tag))
+}}
+{{- range $idx, $svc := $services }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sports-analytics.fullname" $ }}-{{ $svc.name }}
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" $svc.component "Release" $.Release "Chart" $.Chart "Values" $.Values) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "{{ sub -5 $idx }}"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "sports-analytics/rerun-token": {{ $rerun }}
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "sports-analytics.componentLabels" (dict "component" $svc.component "Release" $.Release "Chart" $.Chart "Values" $.Values) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- include "sports-analytics.imagePullSecrets" $ | nindent 6 }}
+      containers:
+        - name: alembic
+          image: {{ include "sports-analytics.image" (dict "repository" $svc.repository "tag" $svc.tag "Values" $.Values) }}
+          imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
+          workingDir: {{ $svc.workingDir | quote }}
+          # `command` overrides the image ENTRYPOINT, which by default boots
+          # uvicorn. Setting it to `alembic upgrade head` reuses the service
+          # image and its frozen venv without a separate migration image.
+          command: ["python", "-m", "alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "sports-analytics.configMapName" $ }}
+            - secretRef:
+                name: {{ include "sports-analytics.secretName" $ }}
+          resources:
+            {{- toYaml $resources | nindent 12 }}
+{{- end }}

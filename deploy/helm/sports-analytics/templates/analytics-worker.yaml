@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-worker
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-worker" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-model-cache
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "model-cache" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.modelCache.storageClass }}
+  storageClassName: {{ .Values.modelCache.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.modelCache.storageSize }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-worker
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-worker" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  replicas: {{ .Values.analyticsWorker.replicas }}
+  ## Worker pods do not need rolling updates; recreate to avoid two pods
+  ## fighting for the same processing list while the previous one drains.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "sports-analytics.componentSelector" (dict "component" "analytics-worker" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sports-analytics.componentLabels" (dict "component" "analytics-worker" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "sports-analytics.fullname" . }}-analytics-worker
+      terminationGracePeriodSeconds: {{ .Values.analyticsWorker.terminationGracePeriodSeconds }}
+      {{- include "sports-analytics.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.modelCache.url }}
+      initContainers:
+        - name: fetch-model
+          image: curlimages/curl:8.10.1
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              dest="{{ .Values.config.yoloModelPath }}"
+              if [ -f "$dest" ]; then
+                echo "Model already present at $dest"
+                exit 0
+              fi
+              mkdir -p "$(dirname "$dest")"
+              echo "Downloading model from {{ .Values.modelCache.url }}"
+              curl -fsSL "{{ .Values.modelCache.url }}" -o "$dest"
+              {{- if .Values.modelCache.sha256 }}
+              echo "{{ .Values.modelCache.sha256 }}  $dest" | sha256sum -c -
+              {{- end }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: /data/yolo
+      {{- end }}
+      containers:
+        - name: analytics-worker
+          image: {{ include "sports-analytics.image" (dict "repository" .Values.analyticsWorker.image.repository "tag" .Values.analyticsWorker.image.tag "Values" .Values) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["python", "-m", "src.worker_main"]
+          env:
+            - name: WORKER_CONSUMER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          envFrom:
+            - configMapRef:
+                name: {{ include "sports-analytics.configMapName" . }}
+            - secretRef:
+                name: {{ include "sports-analytics.secretName" . }}
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test -f {{ .Values.config.workerHeartbeatPath }}
+            failureThreshold: 60
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os, sys, time; sys.exit(0 if time.time()-os.stat('{{ .Values.config.workerHeartbeatPath }}').st_mtime < 60 else 1)"
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.analyticsWorker.resources | nindent 12 }}
+          volumeMounts:
+            - name: uploads
+              mountPath: {{ .Values.config.uploadDir }}
+              readOnly: true
+            - name: model-cache
+              mountPath: /data/yolo
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: {{ include "sports-analytics.fullname" . }}-uploads
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: {{ include "sports-analytics.fullname" . }}-model-cache
+---
+{{- if .Values.analyticsWorker.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-worker
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-worker" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "sports-analytics.fullname" . }}-analytics-worker
+  minReplicaCount: {{ .Values.analyticsWorker.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.analyticsWorker.keda.maxReplicaCount }}
+  pollingInterval: {{ .Values.analyticsWorker.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.analyticsWorker.keda.cooldownPeriod }}
+  triggers:
+    - type: redis
+      metadata:
+        address: "{{ include "sports-analytics.fullname" . }}-redis:6379"
+        listName: {{ .Values.config.analyticsQueue | quote }}
+        listLength: {{ .Values.analyticsWorker.keda.listLength | quote }}
+{{- end }}
+---
+{{- if and (gt (int .Values.analyticsWorker.replicas) 1) (not .Values.analyticsWorker.keda.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-analytics-worker
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "analytics-worker" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "sports-analytics.componentSelector" (dict "component" "analytics-worker" "Release" .Release) | nindent 6 }}
+{{- end }}

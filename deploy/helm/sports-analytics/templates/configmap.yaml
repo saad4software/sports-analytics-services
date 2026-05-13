@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sports-analytics.configMapName" . }}
+  labels:
+    {{- include "sports-analytics.labels" . | nindent 4 }}
+data:
+  # Service-to-service URLs (cluster-internal). Each owning service is its
+  # own Deployment + Service after the auth/media/notifications split, so the
+  # main_service / analytics_worker BFFs target three distinct hosts.
+  AUTH_SERVICE_URL: "http://{{ include "sports-analytics.fullname" . }}-auth-service:8002"
+  MEDIA_SERVICE_URL: "http://{{ include "sports-analytics.fullname" . }}-media-service:8004"
+  NOTIFICATIONS_SERVICE_URL: "http://{{ include "sports-analytics.fullname" . }}-notifications-service:8005"
+  ANALYTICS_SERVICE_URL: "http://{{ include "sports-analytics.fullname" . }}-analytics-api:8003"
+
+  # Shared JWT / HTTP knobs.
+  JWT_ALGORITHM: {{ .Values.config.jwtAlgorithm | quote }}
+  JWT_ACCESS_EXP_MINUTES: {{ .Values.config.jwtAccessExpMinutes | quote }}
+  PUBLIC_BASE_URL: {{ .Values.config.publicBaseUrl | quote }}
+  UPLOAD_DIR: {{ .Values.config.uploadDir | quote }}
+
+  # Analytics worker / queue.
+  REDIS_URL: "redis://{{ include "sports-analytics.fullname" . }}-redis:6379/0"
+  ANALYTICS_QUEUE: {{ .Values.config.analyticsQueue | quote }}
+  YOLO_MODEL_PATH: {{ .Values.config.yoloModelPath | quote }}
+  WORKER_HEARTBEAT_PATH: {{ .Values.config.workerHeartbeatPath | quote }}
+  ANALYTICS_MAX_ATTEMPTS: {{ .Values.config.workerMaxAttempts | quote }}
+
+  # DB pool tuning for database-owning workloads.
+  DB_POOL_SIZE: {{ .Values.config.dbPoolSize | quote }}
+  DB_MAX_OVERFLOW: {{ .Values.config.dbMaxOverflow | quote }}
+  DB_POOL_RECYCLE_SECONDS: {{ .Values.config.dbPoolRecycleSeconds | quote }}

@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+compose.env
+*.sqlite3
+*.sqlite3-journal
+uploads/
+*.pt
+.DS_Store
+.idea/
+.pytest_cache/
+*.pt
+*.mp4

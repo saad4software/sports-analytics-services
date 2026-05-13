@@ -1,0 +1,260 @@
+# Env: copy compose.env.example -> compose.env (secrets + compose config; see README).
+
+# Bind-mount workspace sources; enable reload with UV_DEV_RELOAD in compose.env (see compose.env.example).
+x-app-source-volumes: &app_source_volumes
+  - ./packages:/app/packages
+  - ./services:/app/services
+  - ./pyproject.toml:/app/pyproject.toml:ro
+  - ./uv.lock:/app/uv.lock:ro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    env_file:
+      - compose.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --- One-shot migration jobs: one per owning service ---
+
+  auth_migrate:
+    build:
+      context: .
+      dockerfile: services/auth_service/Dockerfile
+    env_file:
+      - compose.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /app/services/auth_service
+    entrypoint: []
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    restart: "no"
+
+  media_migrate:
+    build:
+      context: .
+      dockerfile: services/media_service/Dockerfile
+    env_file:
+      - compose.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /app/services/media_service
+    entrypoint: []
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    restart: "no"
+
+  notifications_migrate:
+    build:
+      context: .
+      dockerfile: services/notifications_service/Dockerfile
+    env_file:
+      - compose.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /app/services/notifications_service
+    entrypoint: []
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    restart: "no"
+
+  # --- Application services ---
+
+  auth_service:
+    build:
+      context: .
+      dockerfile: services/auth_service/Dockerfile
+    env_file:
+      - compose.env
+    volumes: *app_source_volumes
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth_migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8002/health\")"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  media_service:
+    build:
+      context: .
+      dockerfile: services/media_service/Dockerfile
+    env_file:
+      - compose.env
+    volumes: *app_source_volumes
+    depends_on:
+      postgres:
+        condition: service_healthy
+      media_migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8004:8004"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8004/health\")"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  notifications_service:
+    build:
+      context: .
+      dockerfile: services/notifications_service/Dockerfile
+    env_file:
+      - compose.env
+    volumes: *app_source_volumes
+    depends_on:
+      postgres:
+        condition: service_healthy
+      notifications_migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8005:8005"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8005/health\")"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  analytics_api:
+    build:
+      context: .
+      dockerfile: services/analytics_service/Dockerfile
+    env_file:
+      - compose.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    volumes: *app_source_volumes
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8003:8003"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8003/health\")"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  analytics_worker:
+    build:
+      context: .
+      dockerfile: services/analytics_worker/Dockerfile
+    env_file:
+      - compose.env
+    environment:
+      MEDIA_SERVICE_URL: http://media_service:8004
+      NOTIFICATIONS_SERVICE_URL: http://notifications_service:8005
+      REDIS_URL: redis://redis:6379/0
+      YOLO_MODEL_PATH: /data/yolo/yolo26x.pt
+      WORKER_HEARTBEAT_PATH: /tmp/heartbeat
+    volumes:
+      - yolo_weights:/data/yolo
+      - main_uploads:/data/uploads:ro
+      - ./packages:/app/packages
+      - ./services:/app/services
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./uv.lock:/app/uv.lock:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      media_service:
+        condition: service_healthy
+      notifications_service:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import os,sys,time; sys.exit(0 if time.time()-os.stat('/tmp/heartbeat').st_mtime < 30 else 1)\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+
+  main_service:
+    build:
+      context: .
+      dockerfile: services/main_service/Dockerfile
+    env_file:
+      - compose.env
+    environment:
+      AUTH_SERVICE_URL: http://auth_service:8002
+      MEDIA_SERVICE_URL: http://media_service:8004
+      NOTIFICATIONS_SERVICE_URL: http://notifications_service:8005
+      ANALYTICS_SERVICE_URL: http://analytics_api:8003
+      UPLOAD_DIR: /data/uploads
+    volumes:
+      - main_uploads:/data/uploads
+      - ./packages:/app/packages
+      - ./services:/app/services
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./uv.lock:/app/uv.lock:ro
+    depends_on:
+      auth_service:
+        condition: service_healthy
+      media_service:
+        condition: service_healthy
+      notifications_service:
+        condition: service_healthy
+      analytics_api:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/health\")"',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  postgres_data:
+  main_uploads:
+  yolo_weights:

@@ -1,0 +1,92 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-postgres
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "postgres" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  selector:
+    {{- include "sports-analytics.componentSelector" (dict "component" "postgres" "Release" .Release) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-postgres
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "postgres" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  serviceName: {{ include "sports-analytics.fullname" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "sports-analytics.componentSelector" (dict "component" "postgres" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sports-analytics.componentLabels" (dict "component" "postgres" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 8 }}
+    spec:
+      {{- include "sports-analytics.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image | quote }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.postgres.password | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # Mounting the projected ConfigMap as 0755 (executable) is required
+            # by docker-entrypoint.sh which `source`s / executes *.sh entries.
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: init-scripts
+          configMap:
+            name: {{ include "sports-analytics.fullname" . }}-postgres-init
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.postgres.storageClass }}
+        storageClassName: {{ .Values.postgres.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storageSize }}
+{{- end }}

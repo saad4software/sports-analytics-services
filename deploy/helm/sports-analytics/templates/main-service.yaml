@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-main-service
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "main-service" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-uploads
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "uploads" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.uploads.accessMode | default "ReadWriteMany" }}
+  {{- if .Values.uploads.storageClass }}
+  storageClassName: {{ .Values.uploads.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.uploads.storageSize }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-main-service
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "main-service" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    {{- include "sports-analytics.componentSelector" (dict "component" "main-service" "Release" .Release) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-main-service
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "main-service" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  replicas: {{ .Values.mainService.replicas }}
+  selector:
+    matchLabels:
+      {{- include "sports-analytics.componentSelector" (dict "component" "main-service" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sports-analytics.componentLabels" (dict "component" "main-service" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "sports-analytics.fullname" . }}-main-service
+      {{- include "sports-analytics.imagePullSecrets" . | nindent 6 }}
+      # The main_service image runs as UID 10001 (`app`). Setting fsGroup
+      # tells the kubelet to chgrp the uploads PVC mount on attach so the
+      # non-root user can write video files into it.
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: main-service
+          image: {{ include "sports-analytics.image" (dict "repository" .Values.mainService.image.repository "tag" .Values.mainService.image.tag "Values" .Values) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: {{ include "sports-analytics.configMapName" . }}
+            - secretRef:
+                name: {{ include "sports-analytics.secretName" . }}
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.mainService.resources | nindent 12 }}
+          volumeMounts:
+            - name: uploads
+              mountPath: {{ .Values.config.uploadDir }}
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: {{ include "sports-analytics.fullname" . }}-uploads
+---
+{{- if .Values.mainService.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-main-service
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "main-service" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "sports-analytics.fullname" . }}-main-service
+  minReplicas: {{ .Values.mainService.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.mainService.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.mainService.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+---
+{{- if or .Values.mainService.autoscaling.enabled (gt (int .Values.mainService.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sports-analytics.fullname" . }}-main-service
+  labels:
+    {{- include "sports-analytics.componentLabels" (dict "component" "main-service" "Release" .Release "Chart" .Chart "Values" .Values) | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "sports-analytics.componentSelector" (dict "component" "main-service" "Release" .Release) | nindent 6 }}
+{{- end }}
